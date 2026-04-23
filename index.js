@@ -2,22 +2,21 @@ const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const fs = require('fs');
+const multer = require('multer');
+const upload = multer({ dest: '/tmp/' });
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-app.use(express.json({ limit: '100mb' }));
 
-app.post('/render', async (req, res) => {
-  const { imageBase64, audioBase64 } = req.body;
-  const imagePath = '/tmp/input.jpg';
-  const audioPath = '/tmp/audio.mp3';
+app.post('/render', upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'audio', maxCount: 1 }
+]), async (req, res) => {
+  const imagePath = req.files['image'][0].path;
+  const audioPath = req.files['audio'][0].path;
   const outputPath = '/tmp/output.mp4';
 
   try {
-    fs.writeFileSync(imagePath, Buffer.from(imageBase64, 'base64'));
-    fs.writeFileSync(audioPath, Buffer.from(audioBase64, 'base64'));
-    console.log('Files written OK');
-
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(imagePath)
@@ -28,8 +27,8 @@ app.post('/render', async (req, res) => {
         .size('1920x1080')
         .outputOptions(['-pix_fmt yuv420p', '-shortest'])
         .output(outputPath)
-        .on('end', () => { console.log('FFmpeg done!'); resolve(); })
-        .on('error', (err) => { console.error('FFmpeg error:', err.message); reject(err); })
+        .on('end', resolve)
+        .on('error', reject)
         .run();
     });
 
