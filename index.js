@@ -7,23 +7,25 @@ const multer = require('multer');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
-const upload = multer({ dest: '/tmp/' });
+const upload = multer({ dest: '/tmp/', fileFilter: (req, file, cb) => cb(null, true) });
 
 app.post('/render', upload.single('image'), async (req, res) => {
-  const imagePath = req.file.path;
-  const audioUrl = req.body.audioUrl;
-  const audioPath = '/tmp/audio.mp3';
-  const outputPath = '/tmp/output.mp4';
-
   try {
-    console.log('Downloading audio from:', audioUrl);
+    const imagePath = req.file.path;
+    const audioUrl = req.query.audioUrl;
+    const audioPath = '/tmp/audio.mp3';
+    const outputPath = '/tmp/output.mp4';
+
+    console.log('Image received:', imagePath);
+    console.log('Audio URL:', audioUrl);
+
     const audioRes = await axios.get(audioUrl, {
       responseType: 'arraybuffer',
       maxRedirects: 10,
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     fs.writeFileSync(audioPath, Buffer.from(audioRes.data));
-    console.log('Audio downloaded, running FFmpeg...');
+    console.log('Audio downloaded!');
 
     await new Promise((resolve, reject) => {
       ffmpeg()
@@ -35,14 +37,15 @@ app.post('/render', upload.single('image'), async (req, res) => {
         .size('1920x1080')
         .outputOptions(['-pix_fmt yuv420p', '-shortest'])
         .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
+        .on('end', () => { console.log('Done!'); resolve(); })
+        .on('error', (err) => { console.error('FFmpeg error:', err.message); reject(err); })
         .run();
     });
 
     const video = fs.readFileSync(outputPath);
     res.set('Content-Type', 'video/mp4');
     res.send(video);
+
   } catch (err) {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
