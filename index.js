@@ -1,6 +1,7 @@
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
+const axios = require('axios');
 const fs = require('fs');
 const multer = require('multer');
 
@@ -8,15 +9,21 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 const upload = multer({ dest: '/tmp/' });
 
-app.post('/render', upload.fields([
-  { name: 'image', maxCount: 1 },
-  { name: 'audio', maxCount: 1 }
-]), async (req, res) => {
+app.post('/render', upload.single('image'), async (req, res) => {
+  const imagePath = req.file.path;
+  const audioUrl = req.body.audioUrl;
+  const audioPath = '/tmp/audio.mp3';
+  const outputPath = '/tmp/output.mp4';
+
   try {
-    console.log('Files:', JSON.stringify(req.files));
-    const imagePath = req.files['image'][0].path;
-    const audioPath = req.files['audio'][0].path;
-    const outputPath = '/tmp/output.mp4';
+    console.log('Downloading audio from:', audioUrl);
+    const audioRes = await axios.get(audioUrl, {
+      responseType: 'arraybuffer',
+      maxRedirects: 10,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    fs.writeFileSync(audioPath, Buffer.from(audioRes.data));
+    console.log('Audio downloaded, running FFmpeg...');
 
     await new Promise((resolve, reject) => {
       ffmpeg()
