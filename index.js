@@ -22,90 +22,51 @@ async function downloadFile(url, destPath) {
 }
 
 app.get('/render', async (req, res) => {
-  const { videoUrls, audioUrl, duration, title } = req.query;
+  const { videoUrl, audioUrl, duration, title } = req.query;
   const maxDuration = parseInt(duration) || 60;
-  const videoList = videoUrls.split(',');
+  const safeTitle = (title || 'Watch Now').replace(/'/g, '');
+  const videoPath = '/tmp/input.mp4';
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
-  const concatPath = '/tmp/concat.txt';
-  const videoPaths = [];
 
   try {
-    // Download all video clips
-    for (let i = 0; i < videoList.length; i++) {
-      const vPath = `/tmp/video_${i}.mp4`;
-      console.log(`Downloading video ${i + 1}/${videoList.length}`);
-      await downloadFile(videoList[i], vPath);
-      videoPaths.push(vPath);
-    }
-    console.log('All videos downloaded!');
+    console.log('Downloading video...');
+    await downloadFile(videoUrl, videoPath);
+    console.log('Video downloaded!');
 
-    // Download audio
     console.log('Downloading audio...');
     await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
-    // Create concat file — repeat clips to fill duration
-    const singleClipDuration = Math.floor(maxDuration / videoList.length);
-    let concatContent = '';
-    for (const vPath of videoPaths) {
-      concatContent += `file '${vPath}'\n`;
-    }
-    // Write concat list
-    fs.writeFileSync(concatPath, concatContent);
-
     console.log('Max duration:', maxDuration);
-    console.log('Clips:', videoList.length);
 
-    // Step 1 — concat all clips into one video
-    const concatOutput = '/tmp/concat_output.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(concatPath)
+        .input(videoPath)
         .inputOptions([
-          '-f', 'concat',
-          '-safe', '0',
-          '-stream_loop', '3',           // ✅ loop the whole concat 3 times
+          '-stream_loop', '-1',
+          '-t', maxDuration.toString()
         ])
-        .videoCodec('libx264')
-        .outputOptions([
-          '-t', maxDuration.toString(),
-          '-preset ultrafast',
-          '-crf 28',
-          '-an',                         // no audio yet
-        ])
-        .output(concatOutput)
-        .on('end', () => { console.log('Concat done!'); resolve(); })
-        .on('error', reject)
-        .run();
-    });
-
-    // Step 2 — add audio + text overlay
-    const videoTitle = title || 'Watch Till End!';
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(concatOutput)
         .input(audioPath)
-        .inputOptions(['-stream_loop', '-1'])  // loop audio
+        .inputOptions(['-stream_loop', '-1'])
         .videoCodec('libx264')
         .audioCodec('aac')
         .outputOptions([
           '-map 0:v:0',
           '-map 1:a:0',
-          '-t', maxDuration.toString(),
           '-preset ultrafast',
           '-crf 28',
           '-threads 1',
-          '-ar 44100',                   // ✅ stereo audio
+          '-ar 44100',
           '-ac 2',
           '-b:a 192k',
-          // ✅ text overlay at top
-          `-vf drawtext=text='${videoTitle}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=40:box=1:boxcolor=black@0.5:boxborderw=10`,
+          `-vf drawtext=text='${safeTitle}':fontsize=32:fontcolor=white:x=(w-text_w)/2:y=30:box=1:boxcolor=black@0.6:boxborderw=8,drawtext=text='SUBSCRIBE for more!':fontsize=24:fontcolor=yellow:x=(w-text_w)/2:y=h-60:box=1:boxcolor=black@0.6:boxborderw=6`,
         ])
+        .duration(maxDuration)
         .output(outputPath)
-        .on('start', cmd => console.log('FFmpeg cmd:', cmd))
+        .on('start', () => console.log('FFmpeg started'))
         .on('end', () => { console.log('FFmpeg done!'); resolve(); })
-        .on('error', reject)
+        .on('error', (err) => { console.error('FFmpeg error:', err.message); reject(err); })
         .run();
     });
 
@@ -117,9 +78,9 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    // Cleanup
-    [...videoPaths, audioPath, outputPath, concatPath, '/tmp/concat_output.mp4']
-      .forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
+    [videoPath, audioPath, outputPath].forEach(f => {
+      try { fs.unlinkSync(f); } catch (_) {}
+    });
   }
 });
 
