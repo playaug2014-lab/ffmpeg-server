@@ -21,6 +21,7 @@ async function downloadFile(url, destPath) {
   fs.writeFileSync(destPath, Buffer.from(res.data));
 }
 
+// ✅ CHANGE 1: Removed -an, added -c:a aac and -b:a 192k to keep original audio
 async function normalizeClip(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg()
@@ -30,8 +31,9 @@ async function normalizeClip(inputPath, outputPath) {
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '28',
-        '-threads', '1',       // ✅ FIX 1: limit threads
-        '-an'
+        '-threads', '1',
+        '-c:a', 'aac',      // ✅ keeps original audio (was -an)
+        '-b:a', '192k'      // ✅ audio quality
       ])
       .output(outputPath)
       .on('end', resolve)
@@ -40,7 +42,7 @@ async function normalizeClip(inputPath, outputPath) {
   });
 }
 
-// ✅ FIX 2: delete raw clip immediately after normalizing
+// delete raw clip immediately after normalizing
 async function downloadAndNormalize(url, index) {
   const rawPath = `/tmp/video_${index}.mp4`;
   const normPath = `/tmp/norm_${index}.mp4`;
@@ -52,7 +54,7 @@ async function downloadAndNormalize(url, index) {
   console.log(`Normalizing clip ${index + 1}...`);
   await normalizeClip(rawPath, normPath);
 
-  // ✅ Delete raw file RIGHT AWAY to free memory
+  // Delete raw file RIGHT AWAY to free memory
   try { fs.unlinkSync(rawPath); } catch (_) {}
   console.log(`Clip ${index + 1} normalized!`);
 
@@ -60,25 +62,23 @@ async function downloadAndNormalize(url, index) {
 }
 
 app.get('/render', async (req, res) => {
-  const { videoUrls, audioUrl, duration } = req.query;
+  const { videoUrls, duration } = req.query;   // ✅ CHANGE 3: removed audioUrl
   const maxDuration = parseInt(duration) || 60;
   const urlList = (videoUrls || '').split('|').filter(Boolean);
-  const audioPath = '/tmp/audio.mp3';
+  // ✅ CHANGE 4: removed audioPath — no longer needed
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
   const normalizedPaths = [];
 
   try {
-    // ✅ FIX 3: download + normalize + delete raw, one at a time
+    // download + normalize + delete raw, one at a time
     for (let i = 0; i < urlList.length; i++) {
       const normPath = await downloadAndNormalize(urlList[i], i);
       normalizedPaths.push(normPath);
     }
 
-    // Download audio
-    console.log('Downloading audio...');
-    await downloadFile(audioUrl, audioPath);
-    console.log('Audio downloaded!');
+    // ✅ CHANGE 3: Removed audio download block entirely
+    // (audio comes from the video clips themselves)
 
     // Build concat file
     const timesNeeded = Math.ceil(maxDuration / (normalizedPaths.length * 20));
@@ -93,17 +93,16 @@ app.get('/render', async (req, res) => {
     console.log('Clips:', normalizedPaths.length);
     console.log('Loop times:', timesNeeded);
 
-    // ✅ FIX 4: final concat uses -c copy (no re-encoding!)
+    // ✅ CHANGE 2: Removed external audio input, use -map 0:a:0 (clip audio only)
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
-        .input(audioPath)
-        .inputOptions(['-stream_loop', '-1'])
+        // removed: .input(audioPath) and .inputOptions(['-stream_loop', '-1'])
         .outputOptions([
           '-map 0:v:0',
-          '-map 1:a:0',
-          '-c:v', 'copy',        // ✅ no re-encode, just copy stream
+          '-map 0:a:0',      // ✅ audio from clips (was -map 1:a:0)
+          '-c:v', 'copy',
           '-c:a', 'aac',
           '-ar', '44100',
           '-ac', '2',
@@ -125,7 +124,8 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    [...normalizedPaths, audioPath, outputPath, concatPath].forEach(f => {
+    // ✅ CHANGE 4: removed audioPath from cleanup (no longer exists)
+    [...normalizedPaths, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
   }
