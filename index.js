@@ -8,8 +8,8 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-app.post('/render', async (req, res) => {
-  const { videoUrl, audioUrl } = req.body;
+app.get('/render', async (req, res) => {                     // ✅ CHANGE 1
+  const { videoUrl, audioUrl } = req.query;                  // ✅ CHANGE 1
   const videoPath = '/tmp/input.mp4';
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
@@ -19,6 +19,7 @@ app.post('/render', async (req, res) => {
     const videoRes = await axios.get(videoUrl, {
       responseType: 'arraybuffer',
       maxRedirects: 10,
+      timeout: 120000,                                        // ✅ CHANGE 3
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
@@ -27,8 +28,12 @@ app.post('/render', async (req, res) => {
     console.log('Downloading audio:', audioUrl);
     const audioRes = await axios.get(audioUrl, {
       responseType: 'arraybuffer',
-      maxRedirects: 10,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+      maxRedirects: 15,                                       // ✅ CHANGE 2
+      timeout: 120000,                                        // ✅ CHANGE 2
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Cookie': 'download_warning=t',                      // ✅ CHANGE 2
+      },
     });
     fs.writeFileSync(audioPath, Buffer.from(audioRes.data));
     console.log('Audio downloaded!');
