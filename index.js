@@ -8,63 +8,104 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+async function downloadFile(url, destPath) {
+  const res = await axios.get(url, {
+    responseType: 'arraybuffer',
+    maxRedirects: 15,
+    timeout: 120000,
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Cookie': 'download_warning=t',
+    },
+  });
+  fs.writeFileSync(destPath, Buffer.from(res.data));
+}
+
 app.get('/render', async (req, res) => {
-  const { videoUrl, audioUrl, duration } = req.query;
+  const { videoUrls, audioUrl, duration, title } = req.query;
   const maxDuration = parseInt(duration) || 60;
-  const videoPath = '/tmp/input.mp4';
+  const videoList = videoUrls.split(',');
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
+  const concatPath = '/tmp/concat.txt';
+  const videoPaths = [];
 
   try {
-    console.log('Downloading video:', videoUrl);
-    const videoRes = await axios.get(videoUrl, {
-      responseType: 'arraybuffer',
-      maxRedirects: 10,
-      timeout: 120000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-    fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
-    console.log('Video downloaded!');
+    // Download all video clips
+    for (let i = 0; i < videoList.length; i++) {
+      const vPath = `/tmp/video_${i}.mp4`;
+      console.log(`Downloading video ${i + 1}/${videoList.length}`);
+      await downloadFile(videoList[i], vPath);
+      videoPaths.push(vPath);
+    }
+    console.log('All videos downloaded!');
 
-    console.log('Downloading audio:', audioUrl);
-    const audioRes = await axios.get(audioUrl, {
-      responseType: 'arraybuffer',
-      maxRedirects: 15,
-      timeout: 120000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Cookie': 'download_warning=t',
-      },
-    });
-    fs.writeFileSync(audioPath, Buffer.from(audioRes.data));
+    // Download audio
+    console.log('Downloading audio...');
+    await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
-    console.log('Max duration:', maxDuration);
+    // Create concat file — repeat clips to fill duration
+    const singleClipDuration = Math.floor(maxDuration / videoList.length);
+    let concatContent = '';
+    for (const vPath of videoPaths) {
+      concatContent += `file '${vPath}'\n`;
+    }
+    // Write concat list
+    fs.writeFileSync(concatPath, concatContent);
 
+    console.log('Max duration:', maxDuration);
+    console.log('Clips:', videoList.length);
+
+    // Step 1 — concat all clips into one video
+    const concatOutput = '/tmp/concat_output.mp4';
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(videoPath)
+        .input(concatPath)
         .inputOptions([
-          '-stream_loop', '-1',         // ✅ loop video infinitely
-          '-t', maxDuration.toString()  // ✅ limit loop to duration
+          '-f', 'concat',
+          '-safe', '0',
+          '-stream_loop', '3',           // ✅ loop the whole concat 3 times
         ])
+        .videoCodec('libx264')
+        .outputOptions([
+          '-t', maxDuration.toString(),
+          '-preset ultrafast',
+          '-crf 28',
+          '-an',                         // no audio yet
+        ])
+        .output(concatOutput)
+        .on('end', () => { console.log('Concat done!'); resolve(); })
+        .on('error', reject)
+        .run();
+    });
+
+    // Step 2 — add audio + text overlay
+    const videoTitle = title || 'Watch Till End!';
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(concatOutput)
         .input(audioPath)
+        .inputOptions(['-stream_loop', '-1'])  // loop audio
         .videoCodec('libx264')
         .audioCodec('aac')
         .outputOptions([
           '-map 0:v:0',
           '-map 1:a:0',
+          '-t', maxDuration.toString(),
           '-preset ultrafast',
           '-crf 28',
-          '-threads 1'
-          // ✅ no -shortest
-          // ✅ no -t here
+          '-threads 1',
+          '-ar 44100',                   // ✅ stereo audio
+          '-ac 2',
+          '-b:a 192k',
+          // ✅ text overlay at top
+          `-vf drawtext=text='${videoTitle}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=40:box=1:boxcolor=black@0.5:boxborderw=10`,
         ])
-        .duration(maxDuration)          // ✅ safety net
         .output(outputPath)
         .on('start', cmd => console.log('FFmpeg cmd:', cmd))
         .on('end', () => { console.log('FFmpeg done!'); resolve(); })
-        .on('error', (err) => { console.error('FFmpeg error:', err.message); reject(err); })
+        .on('error', reject)
         .run();
     });
 
@@ -75,6 +116,10 @@ app.get('/render', async (req, res) => {
   } catch (err) {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
+  } finally {
+    // Cleanup
+    [...videoPaths, audioPath, outputPath, concatPath, '/tmp/concat_output.mp4']
+      .forEach(f => { try { fs.unlinkSync(f); } catch (_) {} });
   }
 });
 
