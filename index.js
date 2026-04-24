@@ -1,11 +1,10 @@
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+const ffmpegPath = require('ffmpeg-static');
 const axios = require('axios');
 const fs = require('fs');
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
+ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
@@ -23,14 +22,9 @@ async function downloadFile(url, destPath) {
 }
 
 app.get('/render', async (req, res) => {
-  const { videoUrls, audioUrl, duration, title } = req.query;
+  const { videoUrls, audioUrl, duration } = req.query;
   const maxDuration = parseInt(duration) || 60;
   const urlList = (videoUrls || '').split('|').filter(Boolean);
-  const safeTitle = (title || 'Watch Now')
-    .replace(/['"\\:]/g, '')
-    .trim()
-    .substring(0, 40);
-
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
@@ -61,10 +55,9 @@ app.get('/render', async (req, res) => {
     }
     fs.writeFileSync(concatPath, concatContent);
     console.log('Max duration:', maxDuration);
-    console.log('Title:', safeTitle);
     console.log('Clips:', urlList.length);
+    console.log('Loop times:', timesNeeded);
 
-    // FFmpeg stitch + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
@@ -82,8 +75,7 @@ app.get('/render', async (req, res) => {
           '-ar 44100',
           '-ac 2',
           '-b:a 192k',
-          '-t', maxDuration.toString(),
-          `-vf drawtext=text='${safeTitle}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=40:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text='SUBSCRIBE':fontsize=28:fontcolor=yellow:x=(w-text_w)/2:y=h-70:box=1:boxcolor=black@0.5:boxborderw=8`
+          '-t', maxDuration.toString()
         ])
         .output(outputPath)
         .on('start', () => console.log('FFmpeg started'))
