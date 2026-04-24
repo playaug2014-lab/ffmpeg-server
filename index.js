@@ -30,6 +30,7 @@ async function normalizeClip(inputPath, outputPath) {
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '28',
+        '-threads', '1',       // ✅ FIX 1: limit threads
         '-an'
       ])
       .output(outputPath)
@@ -39,6 +40,25 @@ async function normalizeClip(inputPath, outputPath) {
   });
 }
 
+// ✅ FIX 2: delete raw clip immediately after normalizing
+async function downloadAndNormalize(url, index) {
+  const rawPath = `/tmp/video_${index}.mp4`;
+  const normPath = `/tmp/norm_${index}.mp4`;
+
+  console.log(`Downloading clip ${index + 1}...`);
+  await downloadFile(url, rawPath);
+  console.log(`Clip ${index + 1} downloaded!`);
+
+  console.log(`Normalizing clip ${index + 1}...`);
+  await normalizeClip(rawPath, normPath);
+
+  // ✅ Delete raw file RIGHT AWAY to free memory
+  try { fs.unlinkSync(rawPath); } catch (_) {}
+  console.log(`Clip ${index + 1} normalized!`);
+
+  return normPath;
+}
+
 app.get('/render', async (req, res) => {
   const { videoUrls, audioUrl, duration } = req.query;
   const maxDuration = parseInt(duration) || 60;
@@ -46,26 +66,13 @@ app.get('/render', async (req, res) => {
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
-  const videoPaths = [];
   const normalizedPaths = [];
 
   try {
-    // Download all clips
+    // ✅ FIX 3: download + normalize + delete raw, one at a time
     for (let i = 0; i < urlList.length; i++) {
-      const vPath = `/tmp/video_${i}.mp4`;
-      console.log(`Downloading clip ${i + 1}/${urlList.length}...`);
-      await downloadFile(urlList[i], vPath);
-      videoPaths.push(vPath);
-      console.log(`Clip ${i + 1} downloaded!`);
-    }
-
-    // Normalize all clips — same resolution + FPS
-    for (let i = 0; i < videoPaths.length; i++) {
-      const normPath = `/tmp/norm_${i}.mp4`;
-      console.log(`Normalizing clip ${i + 1}...`);
-      await normalizeClip(videoPaths[i], normPath);
+      const normPath = await downloadAndNormalize(urlList[i], i);
       normalizedPaths.push(normPath);
-      console.log(`Clip ${i + 1} normalized!`);
     }
 
     // Download audio
@@ -86,24 +93,21 @@ app.get('/render', async (req, res) => {
     console.log('Clips:', normalizedPaths.length);
     console.log('Loop times:', timesNeeded);
 
-    // Final FFmpeg concat + audio
+    // ✅ FIX 4: final concat uses -c copy (no re-encoding!)
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
         .input(audioPath)
         .inputOptions(['-stream_loop', '-1'])
-        .videoCodec('libx264')
-        .audioCodec('aac')
         .outputOptions([
           '-map 0:v:0',
           '-map 1:a:0',
-          '-preset ultrafast',
-          '-crf 28',
-          '-threads 1',
-          '-ar 44100',
-          '-ac 2',
-          '-b:a 192k',
+          '-c:v', 'copy',        // ✅ no re-encode, just copy stream
+          '-c:a', 'aac',
+          '-ar', '44100',
+          '-ac', '2',
+          '-b:a', '192k',
           '-t', maxDuration.toString()
         ])
         .output(outputPath)
@@ -121,7 +125,7 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    [...videoPaths, ...normalizedPaths, audioPath, outputPath, concatPath].forEach(f => {
+    [...normalizedPaths, audioPath, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
   }
