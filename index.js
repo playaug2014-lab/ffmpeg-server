@@ -24,7 +24,14 @@ async function downloadFile(url, destPath) {
 app.get('/render', async (req, res) => {
   const { videoUrl, audioUrl, duration, title } = req.query;
   const maxDuration = parseInt(duration) || 60;
-  const safeTitle = (title || 'Watch Now').replace(/'/g, '');
+
+  // ✅ clean title — remove ALL special chars that break FFmpeg
+  const safeTitle = (title || 'Watch Now')
+    .replace(/['"\\:]/g, '')   // remove quotes, backslash, colon
+    .replace(/\s+/g, ' ')      // normalize spaces
+    .trim()
+    .substring(0, 40);         // max 40 chars
+
   const videoPath = '/tmp/input.mp4';
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
@@ -39,6 +46,7 @@ app.get('/render', async (req, res) => {
     console.log('Audio downloaded!');
 
     console.log('Max duration:', maxDuration);
+    console.log('Safe title:', safeTitle);
 
     await new Promise((resolve, reject) => {
       ffmpeg()
@@ -49,22 +57,55 @@ app.get('/render', async (req, res) => {
         ])
         .input(audioPath)
         .inputOptions(['-stream_loop', '-1'])
-        .videoCodec('libx264')
-        .audioCodec('aac')
+        .complexFilter([
+          // ✅ title text at top
+          {
+            filter: 'drawtext',
+            options: {
+              text: safeTitle,
+              fontsize: 32,
+              fontcolor: 'white',
+              x: '(w-text_w)/2',
+              y: '30',
+              box: 1,
+              boxcolor: 'black@0.6',
+              boxborderw: 8,
+            },
+            inputs: '0:v',
+            outputs: 'titled'
+          },
+          // ✅ subscribe text at bottom
+          {
+            filter: 'drawtext',
+            options: {
+              text: 'SUBSCRIBE for more',
+              fontsize: 24,
+              fontcolor: 'yellow',
+              x: '(w-text_w)/2',
+              y: 'h-60',
+              box: 1,
+              boxcolor: 'black@0.6',
+              boxborderw: 6,
+            },
+            inputs: 'titled',
+            outputs: 'final'
+          }
+        ])
         .outputOptions([
-          '-map 0:v:0',
-          '-map 1:a:0',
+          '-map [final]',        // ✅ video from complexFilter
+          '-map 1:a:0',          // ✅ audio from second input
+          '-c:v libx264',
+          '-c:a aac',
           '-preset ultrafast',
           '-crf 28',
           '-threads 1',
           '-ar 44100',
           '-ac 2',
           '-b:a 192k',
-          `-vf drawtext=text='${safeTitle}':fontsize=32:fontcolor=white:x=(w-text_w)/2:y=30:box=1:boxcolor=black@0.6:boxborderw=8,drawtext=text='SUBSCRIBE for more!':fontsize=24:fontcolor=yellow:x=(w-text_w)/2:y=h-60:box=1:boxcolor=black@0.6:boxborderw=6`,
+          '-t', maxDuration.toString()
         ])
-        .duration(maxDuration)
         .output(outputPath)
-        .on('start', () => console.log('FFmpeg started'))
+        .on('start', (cmd) => console.log('FFmpeg started:', cmd))
         .on('end', () => { console.log('FFmpeg done!'); resolve(); })
         .on('error', (err) => { console.error('FFmpeg error:', err.message); reject(err); })
         .run();
