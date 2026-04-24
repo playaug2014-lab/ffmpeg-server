@@ -3,6 +3,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const axios = require('axios');
 const fs = require('fs');
+const { execSync } = require('child_process');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
@@ -21,28 +22,46 @@ async function downloadFile(url, destPath) {
   fs.writeFileSync(destPath, Buffer.from(res.data));
 }
 
-// ✅ CHANGE 1: Removed -an, added -c:a aac and -b:a 192k to keep original audio
+// ✅ Check if a video file has an audio stream
+function hasAudioStream(filePath) {
+  try {
+    const out = execSync(
+      `ffprobe -v quiet -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 ${filePath}`
+    ).toString();
+    return out.includes('audio');
+  } catch (_) { return false; }
+}
+
+// ✅ Normalize clip — if no audio, inject silent track so concat never crashes
 async function normalizeClip(inputPath, outputPath) {
+  const needsSilence = !hasAudioStream(inputPath);
+  if (needsSilence) {
+    console.log(`  ⚠️  No audio in clip — adding silent track`);
+  }
   return new Promise((resolve, reject) => {
-    ffmpeg()
-      .input(inputPath)
-      .outputOptions([
-        '-vf', 'scale=1280:720,fps=30',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-crf', '28',
-        '-threads', '1',
-        '-c:a', 'aac',      // ✅ keeps original audio (was -an)
-        '-b:a', '192k'      // ✅ audio quality
-      ])
-      .output(outputPath)
-      .on('end', resolve)
-      .on('error', reject)
-      .run();
+    const cmd = ffmpeg().input(inputPath);
+    if (needsSilence) {
+      // Add silent audio source so the clip has an audio stream
+      cmd.input('anullsrc=r=44100:cl=stereo').inputOptions(['-f', 'lavfi']);
+    }
+    cmd.outputOptions([
+      '-vf', 'scale=1280:720,fps=30',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-crf', '28',
+      '-threads', '1',
+      '-c:a', 'aac',      // ✅ keeps original audio (or silence if none)
+      '-b:a', '192k',
+      '-shortest'
+    ])
+    .output(outputPath)
+    .on('end', resolve)
+    .on('error', reject)
+    .run();
   });
 }
 
-// delete raw clip immediately after normalizing
+// Delete raw clip immediately after normalizing to free memory
 async function downloadAndNormalize(url, index) {
   const rawPath = `/tmp/video_${index}.mp4`;
   const normPath = `/tmp/norm_${index}.mp4`;
@@ -62,23 +81,19 @@ async function downloadAndNormalize(url, index) {
 }
 
 app.get('/render', async (req, res) => {
-  const { videoUrls, duration } = req.query;   // ✅ CHANGE 3: removed audioUrl
+  const { videoUrls, duration } = req.query;   // ✅ audioUrl removed — not needed
   const maxDuration = parseInt(duration) || 60;
   const urlList = (videoUrls || '').split('|').filter(Boolean);
-  // ✅ CHANGE 4: removed audioPath — no longer needed
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
   const normalizedPaths = [];
 
   try {
-    // download + normalize + delete raw, one at a time
+    // Download + normalize + delete raw, one at a time
     for (let i = 0; i < urlList.length; i++) {
       const normPath = await downloadAndNormalize(urlList[i], i);
       normalizedPaths.push(normPath);
     }
-
-    // ✅ CHANGE 3: Removed audio download block entirely
-    // (audio comes from the video clips themselves)
 
     // Build concat file
     const timesNeeded = Math.ceil(maxDuration / (normalizedPaths.length * 20));
@@ -93,15 +108,14 @@ app.get('/render', async (req, res) => {
     console.log('Clips:', normalizedPaths.length);
     console.log('Loop times:', timesNeeded);
 
-    // ✅ CHANGE 2: Removed external audio input, use -map 0:a:0 (clip audio only)
+    // Final concat — no external audio, use clips' own audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
-        // removed: .input(audioPath) and .inputOptions(['-stream_loop', '-1'])
         .outputOptions([
           '-map 0:v:0',
-          '-map 0:a:0',      // ✅ audio from clips (was -map 1:a:0)
+          '-map 0:a:0',    // ✅ audio from clips (guaranteed to exist after normalizeClip)
           '-c:v', 'copy',
           '-c:a', 'aac',
           '-ar', '44100',
@@ -124,7 +138,7 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    // ✅ CHANGE 4: removed audioPath from cleanup (no longer exists)
+    // ✅ audioPath removed from cleanup
     [...normalizedPaths, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
