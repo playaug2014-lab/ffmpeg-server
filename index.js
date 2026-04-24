@@ -8,8 +8,9 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-app.get('/render', async (req, res) => {                     // ✅ CHANGE 1
-  const { videoUrl, audioUrl } = req.query;                  // ✅ CHANGE 1
+app.get('/render', async (req, res) => {
+  const { videoUrl, audioUrl, duration } = req.query;        // ✅ add duration
+  const maxDuration = parseInt(duration) || 60;              // ✅ default 60 if missing
   const videoPath = '/tmp/input.mp4';
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
@@ -19,7 +20,7 @@ app.get('/render', async (req, res) => {                     // ✅ CHANGE 1
     const videoRes = await axios.get(videoUrl, {
       responseType: 'arraybuffer',
       maxRedirects: 10,
-      timeout: 120000,                                        // ✅ CHANGE 3
+      timeout: 120000,
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     fs.writeFileSync(videoPath, Buffer.from(videoRes.data));
@@ -28,15 +29,17 @@ app.get('/render', async (req, res) => {                     // ✅ CHANGE 1
     console.log('Downloading audio:', audioUrl);
     const audioRes = await axios.get(audioUrl, {
       responseType: 'arraybuffer',
-      maxRedirects: 15,                                       // ✅ CHANGE 2
-      timeout: 120000,                                        // ✅ CHANGE 2
+      maxRedirects: 15,
+      timeout: 120000,
       headers: {
         'User-Agent': 'Mozilla/5.0',
-        'Cookie': 'download_warning=t',                      // ✅ CHANGE 2
+        'Cookie': 'download_warning=t',
       },
     });
     fs.writeFileSync(audioPath, Buffer.from(audioRes.data));
     console.log('Audio downloaded!');
+
+    console.log('Max duration:', maxDuration);               // ✅ log it
 
     await new Promise((resolve, reject) => {
       ffmpeg()
@@ -47,6 +50,7 @@ app.get('/render', async (req, res) => {                     // ✅ CHANGE 1
         .outputOptions([
           '-map 0:v:0',
           '-map 1:a:0',
+          '-t', maxDuration.toString(),                      // ✅ limit duration
           '-shortest',
           '-preset ultrafast',
           '-crf 28',
