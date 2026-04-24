@@ -1,10 +1,11 @@
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
+const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
 const axios = require('axios');
 const fs = require('fs');
 
-ffmpeg.setFfmpegPath(ffmpegPath);
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
@@ -22,30 +23,52 @@ async function downloadFile(url, destPath) {
 }
 
 app.get('/render', async (req, res) => {
-  const { videoUrl, audioUrl, duration } = req.query;
+  const { videoUrls, audioUrl, duration, title } = req.query;
   const maxDuration = parseInt(duration) || 60;
-  const videoPath = '/tmp/input.mp4';
+  const urlList = (videoUrls || '').split('|').filter(Boolean);
+  const safeTitle = (title || 'Watch Now')
+    .replace(/['"\\:]/g, '')
+    .trim()
+    .substring(0, 40);
+
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
+  const concatPath = '/tmp/concat.txt';
+  const videoPaths = [];
 
   try {
-    console.log('Downloading video...');
-    await downloadFile(videoUrl, videoPath);
-    console.log('Video downloaded!');
+    // Download all clips
+    for (let i = 0; i < urlList.length; i++) {
+      const vPath = `/tmp/video_${i}.mp4`;
+      console.log(`Downloading clip ${i + 1}/${urlList.length}...`);
+      await downloadFile(urlList[i], vPath);
+      videoPaths.push(vPath);
+      console.log(`Clip ${i + 1} downloaded!`);
+    }
 
+    // Download audio
     console.log('Downloading audio...');
     await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
+    // Build concat file
+    const timesNeeded = Math.ceil(maxDuration / (urlList.length * 20));
+    let concatContent = '';
+    for (let t = 0; t < timesNeeded; t++) {
+      for (const vPath of videoPaths) {
+        concatContent += `file '${vPath}'\n`;
+      }
+    }
+    fs.writeFileSync(concatPath, concatContent);
     console.log('Max duration:', maxDuration);
+    console.log('Title:', safeTitle);
+    console.log('Clips:', urlList.length);
 
+    // FFmpeg stitch + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
-        .input(videoPath)
-        .inputOptions([
-          '-stream_loop', '-1',
-          '-t', maxDuration.toString()
-        ])
+        .input(concatPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
         .input(audioPath)
         .inputOptions(['-stream_loop', '-1'])
         .videoCodec('libx264')
@@ -59,8 +82,9 @@ app.get('/render', async (req, res) => {
           '-ar 44100',
           '-ac 2',
           '-b:a 192k',
+          '-t', maxDuration.toString(),
+          `-vf drawtext=text='${safeTitle}':fontsize=36:fontcolor=white:x=(w-text_w)/2:y=40:box=1:boxcolor=black@0.5:boxborderw=10,drawtext=text='SUBSCRIBE':fontsize=28:fontcolor=yellow:x=(w-text_w)/2:y=h-70:box=1:boxcolor=black@0.5:boxborderw=8`
         ])
-        .duration(maxDuration)
         .output(outputPath)
         .on('start', () => console.log('FFmpeg started'))
         .on('end', () => { console.log('FFmpeg done!'); resolve(); })
@@ -76,7 +100,7 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    [videoPath, audioPath, outputPath].forEach(f => {
+    [...videoPaths, audioPath, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
   }
