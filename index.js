@@ -3,7 +3,6 @@ const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
 const axios = require('axios');
 const fs = require('fs');
-const { execSync } = require('child_process');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 const app = express();
@@ -22,34 +21,17 @@ async function downloadFile(url, destPath) {
   fs.writeFileSync(destPath, Buffer.from(res.data));
 }
 
-// Check if a video file has an audio stream
-function hasAudioStream(filePath) {
-  try {
-    const out = execSync(
-      `ffprobe -v quiet -show_entries stream=codec_type -of default=noprint_wrappers=1:nokey=1 ${filePath}`
-    ).toString();
-    return out.includes('audio');
-  } catch (_) { return false; }
-}
-
-// Get video duration in seconds
-function getVideoDuration(filePath) {
-  try {
-    return parseFloat(
-      execSync(`ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ${filePath}`)
-      .toString().trim()
-    );
-  } catch (_) { return 10; }
-}
-
-// ✅ Generate silent audio using /dev/zero (works on ffmpeg-static, no lavfi needed)
-function generateSilentAudio(outputPath, durationSeconds) {
+async function normalizeClip(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     ffmpeg()
-      .input('/dev/zero')
-      .inputOptions(['-f', 's16le', '-ar', '44100', '-ac', '2'])
-      .audioCodec('aac')
-      .outputOptions(['-b:a', '128k', '-t', durationSeconds.toString()])
+      .input(inputPath)
+      .outputOptions([
+        '-vf', 'scale=1280:720,fps=30',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-crf', '28',
+        '-an'
+      ])
       .output(outputPath)
       .on('end', resolve)
       .on('error', reject)
@@ -57,88 +39,41 @@ function generateSilentAudio(outputPath, durationSeconds) {
   });
 }
 
-// Normalize clip to 1280x720 — if no audio, add silent track (no lavfi)
-async function normalizeClip(inputPath, outputPath) {
-  const needsSilence = !hasAudioStream(inputPath);
-
-  if (needsSilence) {
-    console.log(`  ⚠️  No audio in clip — adding silent track`);
-    const duration = getVideoDuration(inputPath);
-    const silentPath = outputPath + '.silent.aac';
-    await generateSilentAudio(silentPath, duration);
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(inputPath)
-        .input(silentPath)
-        .outputOptions([
-          '-vf', 'scale=1280:720,fps=30',
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-crf', '28',
-          '-threads', '1',
-          '-c:a', 'aac',
-          '-b:a', '192k',
-          '-shortest'
-        ])
-        .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
-    try { fs.unlinkSync(silentPath); } catch (_) {}
-  } else {
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(inputPath)
-        .outputOptions([
-          '-vf', 'scale=1280:720,fps=30',
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-crf', '28',
-          '-threads', '1',
-          '-c:a', 'aac',
-          '-b:a', '192k'
-        ])
-        .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
-  }
-}
-
-// Download + normalize + delete raw immediately to free memory
-async function downloadAndNormalize(url, index) {
-  const rawPath = `/tmp/video_${index}.mp4`;
-  const normPath = `/tmp/norm_${index}.mp4`;
-
-  console.log(`Downloading clip ${index + 1}...`);
-  await downloadFile(url, rawPath);
-  console.log(`Clip ${index + 1} downloaded!`);
-
-  console.log(`Normalizing clip ${index + 1}...`);
-  await normalizeClip(rawPath, normPath);
-
-  try { fs.unlinkSync(rawPath); } catch (_) {}
-  console.log(`Clip ${index + 1} normalized!`);
-
-  return normPath;
-}
-
 app.get('/render', async (req, res) => {
-  const { videoUrls, duration } = req.query;
+  const { videoUrls, audioUrl, duration } = req.query;
   const maxDuration = parseInt(duration) || 60;
   const urlList = (videoUrls || '').split('|').filter(Boolean);
+  const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
+  const videoPaths = [];
   const normalizedPaths = [];
 
   try {
+    // Download all clips
     for (let i = 0; i < urlList.length; i++) {
-      const normPath = await downloadAndNormalize(urlList[i], i);
-      normalizedPaths.push(normPath);
+      const vPath = `/tmp/video_${i}.mp4`;
+      console.log(`Downloading clip ${i + 1}/${urlList.length}...`);
+      await downloadFile(urlList[i], vPath);
+      videoPaths.push(vPath);
+      console.log(`Clip ${i + 1} downloaded!`);
     }
 
+    // Normalize all clips — same resolution + FPS
+    for (let i = 0; i < videoPaths.length; i++) {
+      const normPath = `/tmp/norm_${i}.mp4`;
+      console.log(`Normalizing clip ${i + 1}...`);
+      await normalizeClip(videoPaths[i], normPath);
+      normalizedPaths.push(normPath);
+      console.log(`Clip ${i + 1} normalized!`);
+    }
+
+    // Download audio
+    console.log('Downloading audio...');
+    await downloadFile(audioUrl, audioPath);
+    console.log('Audio downloaded!');
+
+    // Build concat file
     const timesNeeded = Math.ceil(maxDuration / (normalizedPaths.length * 20));
     let concatContent = '';
     for (let t = 0; t < timesNeeded; t++) {
@@ -151,18 +86,24 @@ app.get('/render', async (req, res) => {
     console.log('Clips:', normalizedPaths.length);
     console.log('Loop times:', timesNeeded);
 
+    // Final FFmpeg concat + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
         .inputOptions(['-f', 'concat', '-safe', '0'])
+        .input(audioPath)
+        .inputOptions(['-stream_loop', '-1'])
+        .videoCodec('libx264')
+        .audioCodec('aac')
         .outputOptions([
           '-map 0:v:0',
-          '-map 0:a:0',   // audio always exists after normalizeClip
-          '-c:v', 'copy',
-          '-c:a', 'aac',
-          '-ar', '44100',
-          '-ac', '2',
-          '-b:a', '192k',
+          '-map 1:a:0',
+          '-preset ultrafast',
+          '-crf 28',
+          '-threads 1',
+          '-ar 44100',
+          '-ac 2',
+          '-b:a 192k',
           '-t', maxDuration.toString()
         ])
         .output(outputPath)
@@ -180,7 +121,7 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    [...normalizedPaths, outputPath, concatPath].forEach(f => {
+    [...videoPaths, ...normalizedPaths, audioPath, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
   }
