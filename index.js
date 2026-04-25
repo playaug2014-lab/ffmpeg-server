@@ -30,6 +30,7 @@ async function imageToSegment(imagePath, outputPath, duration) {
         '-t', duration.toString(),
         '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30',
         '-c:v', 'libx264',
+        '-pix_fmt', 'yuv420p',         // ✅ ADDED
         '-preset', 'ultrafast',
         '-crf', '28',
         '-an'
@@ -52,7 +53,6 @@ app.get('/render', async (req, res) => {
   const segmentPaths = [];
 
   try {
-    // Download all images
     for (let i = 0; i < urlList.length; i++) {
       const imgPath = `/tmp/image_${i}.png`;
       console.log(`Downloading image ${i + 1}/${urlList.length}...`);
@@ -61,7 +61,6 @@ app.get('/render', async (req, res) => {
       console.log(`Image ${i + 1} downloaded!`);
     }
 
-    // Convert each image to video segment
     const segmentDuration = Math.floor(maxDuration / urlList.length);
     console.log(`Each segment duration: ${segmentDuration}s`);
 
@@ -73,12 +72,10 @@ app.get('/render', async (req, res) => {
       console.log(`Segment ${i + 1} done!`);
     }
 
-    // Download audio
     console.log('Downloading audio...');
     await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
-    // Build concat file
     let concatContent = '';
     for (const segPath of segmentPaths) {
       concatContent += `file '${segPath}'\n`;
@@ -87,7 +84,6 @@ app.get('/render', async (req, res) => {
     console.log('Max duration:', maxDuration);
     console.log('Total segments:', segmentPaths.length);
 
-    // Final FFmpeg concat + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
@@ -101,6 +97,7 @@ app.get('/render', async (req, res) => {
           '-map 1:a:0',
           '-preset ultrafast',
           '-crf 28',
+          '-pix_fmt', 'yuv420p',       // ✅ ADDED
           '-threads 1',
           '-ar 44100',
           '-ac 2',
