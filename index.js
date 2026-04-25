@@ -21,12 +21,14 @@ async function downloadFile(url, destPath) {
   fs.writeFileSync(destPath, Buffer.from(res.data));
 }
 
-async function normalizeClip(inputPath, outputPath) {
+async function imageToSegment(imagePath, outputPath, duration) {
   return new Promise((resolve, reject) => {
     ffmpeg()
-      .input(inputPath)
+      .input(imagePath)
+      .inputOptions(['-loop', '1'])
       .outputOptions([
-        '-vf', 'scale=1280:720,fps=30',
+        '-t', duration.toString(),
+        '-vf', 'scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=30',
         '-c:v', 'libx264',
         '-preset', 'ultrafast',
         '-crf', '28',
@@ -41,47 +43,51 @@ async function normalizeClip(inputPath, outputPath) {
 
 app.get('/render', async (req, res) => {
   const { videoUrls, audioUrl, duration } = req.query;
-  const maxDuration = parseInt(duration) || 60;
-  const urlList = (videoUrls || '').split('|').filter(Boolean).slice(0, 3); // ✅ max 3 clips
+  const maxDuration = parseInt(duration) || 180;
+  const urlList = (videoUrls || '').split('|').filter(Boolean).slice(0, 6);
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
-  const videoPaths = [];
-  const normalizedPaths = [];
+  const imagePaths = [];
+  const segmentPaths = [];
 
   try {
+    // Download all images
     for (let i = 0; i < urlList.length; i++) {
-      const vPath = `/tmp/video_${i}.mp4`;
-      console.log(`Downloading clip ${i + 1}/${urlList.length}...`);
-      await downloadFile(urlList[i], vPath);
-      videoPaths.push(vPath);
-      console.log(`Clip ${i + 1} downloaded!`);
+      const imgPath = `/tmp/image_${i}.png`;
+      console.log(`Downloading image ${i + 1}/${urlList.length}...`);
+      await downloadFile(urlList[i], imgPath);
+      imagePaths.push(imgPath);
+      console.log(`Image ${i + 1} downloaded!`);
     }
 
-    for (let i = 0; i < videoPaths.length; i++) {
-      const normPath = `/tmp/norm_${i}.mp4`;
-      console.log(`Normalizing clip ${i + 1}...`);
-      await normalizeClip(videoPaths[i], normPath);
-      normalizedPaths.push(normPath);
-      console.log(`Clip ${i + 1} normalized!`);
+    // Convert each image to video segment
+    const segmentDuration = Math.floor(maxDuration / urlList.length);
+    console.log(`Each segment duration: ${segmentDuration}s`);
+
+    for (let i = 0; i < imagePaths.length; i++) {
+      const segPath = `/tmp/seg_${i}.mp4`;
+      console.log(`Converting image ${i + 1} to segment...`);
+      await imageToSegment(imagePaths[i], segPath, segmentDuration);
+      segmentPaths.push(segPath);
+      console.log(`Segment ${i + 1} done!`);
     }
 
+    // Download audio
     console.log('Downloading audio...');
     await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
-    const timesNeeded = Math.ceil(maxDuration / (normalizedPaths.length * 20));
+    // Build concat file
     let concatContent = '';
-    for (let t = 0; t < timesNeeded; t++) {
-      for (const nPath of normalizedPaths) {
-        concatContent += `file '${nPath}'\n`;
-      }
+    for (const segPath of segmentPaths) {
+      concatContent += `file '${segPath}'\n`;
     }
     fs.writeFileSync(concatPath, concatContent);
     console.log('Max duration:', maxDuration);
-    console.log('Clips:', normalizedPaths.length);
-    console.log('Loop times:', timesNeeded);
+    console.log('Total segments:', segmentPaths.length);
 
+    // Final FFmpeg concat + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
@@ -116,7 +122,7 @@ app.get('/render', async (req, res) => {
     console.error('ERROR:', err.message);
     res.status(500).json({ error: err.message });
   } finally {
-    [...videoPaths, ...normalizedPaths, audioPath, outputPath, concatPath].forEach(f => {
+    [...imagePaths, ...segmentPaths, audioPath, outputPath, concatPath].forEach(f => {
       try { fs.unlinkSync(f); } catch (_) {}
     });
   }
