@@ -42,7 +42,7 @@ async function normalizeClip(inputPath, outputPath) {
 app.get('/render', async (req, res) => {
   const { videoUrls, audioUrl, duration } = req.query;
   const maxDuration = parseInt(duration) || 60;
-  const urlList = (videoUrls || '').split('|').filter(Boolean);
+  const urlList = (videoUrls || '').split('|').filter(Boolean).slice(0, 3); // ✅ max 3 clips
   const audioPath = '/tmp/audio.mp3';
   const outputPath = '/tmp/output.mp4';
   const concatPath = '/tmp/concat.txt';
@@ -50,7 +50,6 @@ app.get('/render', async (req, res) => {
   const normalizedPaths = [];
 
   try {
-    // Download all clips
     for (let i = 0; i < urlList.length; i++) {
       const vPath = `/tmp/video_${i}.mp4`;
       console.log(`Downloading clip ${i + 1}/${urlList.length}...`);
@@ -59,7 +58,6 @@ app.get('/render', async (req, res) => {
       console.log(`Clip ${i + 1} downloaded!`);
     }
 
-    // Normalize all clips — same resolution + FPS
     for (let i = 0; i < videoPaths.length; i++) {
       const normPath = `/tmp/norm_${i}.mp4`;
       console.log(`Normalizing clip ${i + 1}...`);
@@ -68,12 +66,10 @@ app.get('/render', async (req, res) => {
       console.log(`Clip ${i + 1} normalized!`);
     }
 
-    // Download audio
     console.log('Downloading audio...');
     await downloadFile(audioUrl, audioPath);
     console.log('Audio downloaded!');
 
-    // Build concat file
     const timesNeeded = Math.ceil(maxDuration / (normalizedPaths.length * 20));
     let concatContent = '';
     for (let t = 0; t < timesNeeded; t++) {
@@ -86,7 +82,6 @@ app.get('/render', async (req, res) => {
     console.log('Clips:', normalizedPaths.length);
     console.log('Loop times:', timesNeeded);
 
-    // Final FFmpeg concat + audio
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(concatPath)
